@@ -1,12 +1,13 @@
 use crate::{ErrorHandler, RetryPolicy};
 use futures::{ready, Stream, TryStream};
-use pin_project::{pin_project, project};
+use gloo_timers::future::TimeoutFuture;
+use pin_project::pin_project;
 use std::{
+    convert::TryInto,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::time;
 
 trait PollExt<T, E> {
     fn instrument<W>(self, with: W) -> Poll<Result<Option<(T, W)>, (E, W)>>;
@@ -103,10 +104,10 @@ pub trait StreamRetryExt: TryStream {
 
 impl<S: ?Sized> StreamRetryExt for S where S: TryStream {}
 
-#[pin_project]
+#[pin_project(project=RetryStateProj)]
 enum RetryState {
     WaitingForStream,
-    TimerActive(#[pin] time::Delay),
+    TimerActive(#[pin] TimeoutFuture),
 }
 
 impl<F, S> StreamRetry<F, S> {
@@ -148,18 +149,16 @@ where
 {
     type Item = Result<(S::Ok, usize), (F::OutError, usize)>;
 
-    #[project]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         loop {
             let this = self.as_mut().project();
             let attempt = *this.attempt;
-            #[project]
             let new_state = match this.state.project() {
-                RetryState::TimerActive(delay) => {
+                RetryStateProj::TimerActive(delay) => {
                     ready!(delay.poll(cx));
                     RetryState::WaitingForStream
                 }
-                RetryState::WaitingForStream => match ready!(this.stream.try_poll_next(cx)) {
+                RetryStateProj::WaitingForStream => match ready!(this.stream.try_poll_next(cx)) {
                     Some(Ok(x)) => {
                         *this.attempt = 1;
                         this.error_action.ok(attempt);
@@ -175,9 +174,9 @@ where
                                 return Poll::Ready(Some(Err((e, attempt))))
                             }
                             RetryPolicy::Repeat => RetryState::WaitingForStream,
-                            RetryPolicy::WaitRetry(duration) => {
-                                RetryState::TimerActive(time::delay_for(duration))
-                            }
+                            RetryPolicy::WaitRetry(duration) => RetryState::TimerActive(
+                                TimeoutFuture::new(duration.as_millis().try_into().unwrap()),
+                            ),
                         }
                     }
                 },

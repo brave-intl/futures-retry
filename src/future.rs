@@ -1,13 +1,14 @@
 use crate::{ErrorHandler, RetryPolicy};
 use futures::{ready, TryFuture};
-use pin_project::{pin_project, project};
+use gloo_timers::future::TimeoutFuture;
+use pin_project::pin_project;
 use std::{
+    convert::TryInto,
     future::Future,
     marker::Unpin,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::time;
 
 trait PollExt<T, E> {
     fn instrument<W>(self, with: W) -> Poll<Result<(T, W), (E, W)>>;
@@ -71,11 +72,11 @@ where
     state: RetryState<F::FutureItem>,
 }
 
-#[pin_project]
+#[pin_project(project=RetryStateProj)]
 enum RetryState<F> {
     NotStarted,
     WaitingForFuture(#[pin] F),
-    TimerActive(#[pin] time::Delay),
+    TimerActive(#[pin] TimeoutFuture),
 }
 
 impl<F: FutureFactory, R> FutureRetry<F, R> {
@@ -108,19 +109,17 @@ where
     type Output =
         Result<(<<F as FutureFactory>::FutureItem as TryFuture>::Ok, usize), (R::OutError, usize)>;
 
-    #[project]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         loop {
             let this = self.as_mut().project();
             let attempt = *this.attempt;
-            #[project]
             let new_state = match this.state.project() {
-                RetryState::NotStarted => RetryState::WaitingForFuture(this.factory.new()),
-                RetryState::TimerActive(delay) => {
+                RetryStateProj::NotStarted => RetryState::WaitingForFuture(this.factory.new()),
+                RetryStateProj::TimerActive(delay) => {
                     ready!(delay.poll(cx));
                     RetryState::WaitingForFuture(this.factory.new())
                 }
-                RetryState::WaitingForFuture(future) => match ready!(future.try_poll(cx)) {
+                RetryStateProj::WaitingForFuture(future) => match ready!(future.try_poll(cx)) {
                     Ok(x) => {
                         this.error_action.ok(attempt);
                         *this.attempt = 1;
@@ -131,9 +130,9 @@ where
                         match this.error_action.handle(attempt, e) {
                             RetryPolicy::ForwardError(e) => return Poll::Ready(Err((e, attempt))),
                             RetryPolicy::Repeat => RetryState::WaitingForFuture(this.factory.new()),
-                            RetryPolicy::WaitRetry(duration) => {
-                                RetryState::TimerActive(time::delay_for(duration))
-                            }
+                            RetryPolicy::WaitRetry(duration) => RetryState::TimerActive(
+                                TimeoutFuture::new(duration.as_millis().try_into().unwrap()),
+                            ),
                         }
                     }
                 },
