@@ -1,9 +1,8 @@
 use crate::{ErrorHandler, RetryPolicy};
 use futures::{ready, Stream, TryStream};
-use gloo_timers::future::TimeoutFuture;
+use futures_timer::Delay;
 use pin_project::pin_project;
 use std::{
-    convert::TryInto,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -107,7 +106,7 @@ impl<S: ?Sized> StreamRetryExt for S where S: TryStream {}
 #[pin_project(project=RetryStateProj)]
 enum RetryState {
     WaitingForStream,
-    TimerActive(#[pin] TimeoutFuture),
+    TimerActive(#[pin] Delay),
 }
 
 impl<F, S> StreamRetry<F, S> {
@@ -174,9 +173,9 @@ where
                                 return Poll::Ready(Some(Err((e, attempt))))
                             }
                             RetryPolicy::Repeat => RetryState::WaitingForStream,
-                            RetryPolicy::WaitRetry(duration) => RetryState::TimerActive(
-                                TimeoutFuture::new(duration.as_millis().try_into().unwrap()),
-                            ),
+                            RetryPolicy::WaitRetry(duration) => {
+                                RetryState::TimerActive(Delay::new(duration))
+                            }
                         }
                     }
                 },

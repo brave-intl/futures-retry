@@ -1,9 +1,8 @@
 use crate::{ErrorHandler, RetryPolicy};
 use futures::{ready, TryFuture};
-use gloo_timers::future::TimeoutFuture;
+use futures_timer::Delay;
 use pin_project::pin_project;
 use std::{
-    convert::TryInto,
     future::Future,
     marker::Unpin,
     pin::Pin,
@@ -76,7 +75,7 @@ where
 enum RetryState<F> {
     NotStarted,
     WaitingForFuture(#[pin] F),
-    TimerActive(#[pin] TimeoutFuture),
+    TimerActive(#[pin] Delay),
 }
 
 impl<F: FutureFactory, R> FutureRetry<F, R> {
@@ -130,9 +129,9 @@ where
                         match this.error_action.handle(attempt, e) {
                             RetryPolicy::ForwardError(e) => return Poll::Ready(Err((e, attempt))),
                             RetryPolicy::Repeat => RetryState::WaitingForFuture(this.factory.new()),
-                            RetryPolicy::WaitRetry(duration) => RetryState::TimerActive(
-                                TimeoutFuture::new(duration.as_millis().try_into().unwrap()),
-                            ),
+                            RetryPolicy::WaitRetry(duration) => {
+                                RetryState::TimerActive(Delay::new(duration))
+                            }
                         }
                     }
                 },
